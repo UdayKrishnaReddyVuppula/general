@@ -1,0 +1,18 @@
+stack_name: AllCloud-PatchMGMT-InstanceProfiles
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yaml
+
+params:
+  NamePrefix: aws-controltower
+
+targets: # Target Account/OU where this needs to be deployed
+  - <WORKLOAD_ACCOUNT>
+
+regions:
+  - global_main-region
+
+tags:
+  - Key: Config
+    Value: "AllCloud-PatchMGMT-InstanceProfiles"

@@ -1,0 +1,12 @@
+stack_name: AllCloud-PatchMGMT-Spoke-2-2
+type: cloudformation
+depends_on: AllCloud-PatchMGMT-Spoke-1-2
+properties:
+  cloudformation:
+    template_name: template.yaml
+
+targets: # Target Account/OU where this needs to be deployed
+  - <WORKLOAD_ACCOUNT>
+  
+regions:
+  - global_main-region

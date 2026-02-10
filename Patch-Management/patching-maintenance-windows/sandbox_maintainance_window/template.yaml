@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'The AWS CloudFormation template for the creation of the MaintenanceWindow.'
+
+Parameters:
+  NamePrefix:
+    Type: String
+  Schedule:
+    Type: String
+    Description: The schedule of the maintenance window written as a cron expression.
+  Timezone:
+    Type: String
+    Default: America/Toronto
+  ASGLambdaPayloadBase64:
+    Type: String
+    Description: Base64-encoded json to be provided to the MaintenanceWindowASGTaskFunction.
+  LambdaPayloadBase64:
+    Type: String
+    Description: Base64-encoded json to be provided to the MaintenanceWindowTaskFunction.
+  CustomPatchingTagValue:
+    Type: String
+    Description: The env/patchingphase in which the maintenance window runs (sandbox, dev. etc.,).
+
+Resources:
+  MaintenanceWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties: 
+      AllowUnassociatedTargets: true
+      Cutoff: 1
+      Description: "Maintenance window used by the PatchMGMT solution."
+      Duration: 5
+      Name: !Sub "${Environment}_maintenance_window"
+      Schedule: !Ref Schedule
+      ScheduleTimezone: !Ref Timezone
+
+  ASGTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties: 
+      Priority: 2
+      ServiceRoleArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/MaintenanceWindowRole
+      TaskArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:MaintenanceWindowASGTaskFunction'
+      TaskInvocationParameters: 
+        MaintenanceWindowLambdaParameters:
+          Payload: !Ref ASGLambdaPayloadBase64
+      TaskType: LAMBDA
+      WindowId: !Ref MaintenanceWindow
+
+  Task:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties: 
+      Priority: 2
+      ServiceRoleArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/MaintenanceWindowRole
+      TaskArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:MaintenanceWindowTaskFunction'
+      TaskInvocationParameters: 
+        MaintenanceWindowLambdaParameters:
+          Payload: !Ref LambdaPayloadBase64
+      TaskType: LAMBDA
+      WindowId: !Ref MaintenanceWindow
+
+  SNSTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties: 
+      Priority: 1
+      ServiceRoleArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/MaintenanceWindowRole
+      TaskArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:Pre-Patching-snapshots'
+      TaskType: LAMBDA
+      WindowId: !Ref MaintenanceWindow
+      TaskInvocationParameters:
+        MaintenanceWindowLambdaParameters:
+          Payload: 
+            Fn::Base64: 
+              Fn::Sub: |
+                {
+                  "CustomPatchingTagValue": "${CustomPatchingTagValue}"
+                }
+

@@ -1,0 +1,19 @@
+stack_name: resource-env-tagging-dev
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yaml
+params:
+  NamePrefix: <NAME_PREFIX>
+  Environment: <ENVIRONMENT>
+  SNSTopic: "arn:aws:sns:<REGION>:<AUDIT_ACCOUNT_ID>:<SNS_TOPIC_NAME>" #SNS Topic ARN where the notifications need to be sent
+  AutomationName: "EnvironmentTagging"
+
+targets: # Target Account/OU where this needs to be deployed
+  - <WORKLOAD_ACCOUNT>
+  
+regions:
+  - global_main-region
+tags:
+  - Key: type
+    Value: billing

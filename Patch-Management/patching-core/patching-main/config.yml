@@ -1,0 +1,16 @@
+stack_name: AllCloud-PatchMGMT-Main
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yaml
+
+params:
+  ##
+  ArtifactBucket: patch-mgmt-<AUDIT_ACCOUNT_ID>-<REGION>
+  OrgID: <AWS_ORGANIZATION_ID>
+
+targets:
+  - <AUDIT_ACCOUNT>
+
+regions:
+  - `REGION`

@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Add environment tag to EC2/RDS resources upon creation for Dev OUs.
+
+Parameters:
+  NamePrefix:
+    Type: String
+  Environment:
+    Type: String
+  SNSTopic:
+    Type: String
+    Description: ARN of the SNS topic used to send errors.  
+  AutomationName:
+    Type: String
+    Description: 'Name of the automation to be used for the notifications.'
+    Default: 'Automations'
+Resources:
+##tag resources on creation:
+  EnvironmentTaggingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-environment-tagging-${AWS::Region}-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub "${NamePrefix}-environment-tagging-${AWS::Region}-policy"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - "ec2:CreateTags"
+                  - "ec2:Describe*"
+                  - "rds:AddTagsToResource"
+                  - "rds:DescribeDBInstances"
+                  - "rds:ListTagsForResource"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  Ref: SNSTopic
+  EnvironmentTaggingPermissionToCallLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EnvironmentTaggingLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+  EventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: !Sub "${NamePrefix}-environment-tagging-event"
+      State: ENABLED
+      EventPattern:
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventName:
+            - "RunInstances"  # ec2 instance
+            - "CreateDBCluster"  # rds cluster
+            - "CreateDBInstance"  # db instance
+      Targets:
+        - Arn: !GetAtt EnvironmentTaggingLambda.Arn
+          Id: environment-tag
+  EnvironmentTaggingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-environment-tagging-func"
+      Description: Add CreatedBy tags on s3,rds and ec2 instances.
+      Handler: index.lambda_handler
+      Role: !GetAtt EnvironmentTaggingLambdaRole.Arn
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          SNS_TOPIC: !Ref "SNSTopic"
+          AUTOMATION_NAME: !Ref 'AutomationName'
+      Runtime: python3.11
+      Timeout: 60
+      Code: 
+        ZipFile: |
+                import boto3
+                import logging
+                import os
+                import json
+                import time
+                
+                logger = logging.getLogger()
+                logger.setLevel(logging.INFO)
+                
+                ec2 = boto3.client('ec2')
+                rds = boto3.client('rds')
+                
+                sns_topic = os.environ['SNS_TOPIC']
+                automation_name = os.environ['AUTOMATION_NAME']
+                
+                
+                def sns_log(account_id=None, resource_id=None, error=None, extra_information=None):
+                    sns_client = boto3.client('sns')
+                
+                    message = {
+                        "AppName": automation_name,
+                        "AccountId": account_id,
+                        "ResourceId": resource_id,
+                        "Error": error,
+                        "ExtraInformation": extra_information,
+                        "Timestamp": time.time()
+                    }
+                
+                    logger.info(message)
+                    sns_client.publish(
+                        TargetArn=sns_topic,
+                        Message=json.dumps({'default': json.dumps(message)}),
+                        MessageStructure='json')
+                
+                
+                def lambda_handler(event, context):
+                    logger.info(str(event))
+                    ids = []
+                    rds_event = None
+                    environment = os.environ['ENVIRONMENT']
+                
+                    account = "Error getting account data"
+                
+                    try:
+                        detail = event['detail']
+                        account = event['account']
+                        event_name = detail['eventName']
+                
+                        if detail['responseElements'] == "None" or not detail['responseElements']:
+                            logger.info("Action failed, no instances were created. No actions taken by this lambda.")
+                            return
+                
+                        if event_name == 'RunInstances':
+                            items = detail['responseElements']['instancesSet']['items']
+                            for item in items:
+                                ids.append(item['instanceId'])
+                            logger.info(ids)
+                            logger.info('number of instances: {}'.format(len(ids)))
+                        elif event_name == 'CreateDBCluster':
+                            ids.append(detail['responseElements']['dBClusterArn'])
+                            logger.info(ids)
+                            rds_event = 1
+                        elif event_name == 'CreateDBInstance':
+                            ids.append(detail['responseElements']['dBInstanceArn'])
+                            logger.info(ids)
+                            rds_event = 1
+                        else:
+                            logger.warning('Not supported action')
+                
+                        if ids:
+                            for resource_id in ids:
+                                print('Tagging resource ' + resource_id)
+                            if rds_event:
+                                for resource_id in ids:
+                                    response = rds.list_tags_for_resource(ResourceName=resource_id)
+                                    tags = response['TagList']
+                                    tagged = False
+                                    for entry in tags:
+                                        if entry['Key'] == 'environment':
+                                            tagged = True
+                                    if tagged:
+                                        continue
+                                    else:
+                                        rds.add_tags_to_resource(
+                                            ResourceName=resource_id,
+                                            Tags=[{'Key': 'environment', 'Value': environment}]
+                                        )
+                            else:
+                                tmp_ids = []
+                                for resource_id in ids:
+                                    response = ec2.describe_instances(InstanceIds=[resource_id])
+                                    tags = response['Reservations'][0]['Instances'][0]['Tags']
+                                    tagged = False
+                                    for t in tags:
+                                        if t["Key"] == "environment":
+                                            tagged = True
+                                    if tagged:
+                                        continue
+                                    else:
+                                        tmp_ids.append(resource_id)
+                                if tmp_ids:
+                                    ec2.create_tags(Resources=tmp_ids, Tags=[{'Key': 'environment', 'Value': environment}])
+                        return True
+                    except Exception as e:
+                        logger.error('Something went wrong: ' + str(e))
+                        sns_log(account_id=account, resource_id=ids, error=str(e), extra_information="{} tagging".format(environment))
+                        return False

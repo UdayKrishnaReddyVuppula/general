@@ -1,0 +1,173 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: "This Template will create the supporting infrastructure for the aws-lambda-sns-to-slack implementation"
+Parameters:
+  NamePrefix:
+    Type: "String"
+    Default: aws-controltower
+  SlackChannel:
+    Type: "String"
+    Description: The Slack channel used for receiving notifications.
+Resources:
+  StoppedInstancesSNSToSlackLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "Sending messages from SNS to Slack"
+      FunctionName: !Sub "${NamePrefix}-patch-sns-to-slack"
+      Handler: index.lambda_handler
+      MemorySize: 256
+      Role:
+        "Fn::GetAtt":
+          - StoppedInstancesSNSToSlackLambdaRole
+          - Arn
+      Runtime: python3.9
+      Timeout: 60
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          SLACK_CHANNEL:
+            Ref: SlackChannel
+          WEBHOOK_URL_SSM_PARAMETER: /patch-management/slack-notifications/webhook-url
+      Code:
+        ZipFile: |
+              import json
+              import os
+              import boto3
+              import logging
+              import urllib3
+              http = urllib3.PoolManager()
+
+              logger = logging.getLogger()
+
+              if os.environ.get('LOG_LEVEL') == 'DEBUG':
+                logger.setLevel(logging.DEBUG)
+
+              if os.environ.get('LOG_LEVEL') == 'INFO':
+                logger.setLevel(logging.INFO)
+
+              if os.environ.get('LOG_LEVEL') == 'ERROR':
+                logger.setLevel(logging.ERROR)
+
+
+              def lambda_handler(event, context):
+                logger.debug(f'Received event {event}')
+                channel = os.environ.get('SLACK_CHANNEL')
+                ssm = boto3.client('ssm')
+
+                txt = "LZProd:" + event['Records'][0]['Sns']['Message']
+
+                parameter = ssm.get_parameter(Name=os.environ.get('WEBHOOK_URL_SSM_PARAMETER'), WithDecryption=True)
+                url = parameter['Parameter']['Value']
+                msg = {
+                    "channel": channel,
+                    "username": "TEST",
+                    "text": txt,
+                    "icon_emoji": ":fire:"
+                }
+
+                encoded_msg = json.dumps(msg).encode('utf-8')
+                try:
+                    resp = http.request('POST', url, body=encoded_msg)
+                    logger.info(f"Message posted to {msg['channel']}")
+                except urllib3.exceptions.HTTPError as e:
+                    logger.error(f"Request failed: {e.code}, {e.reason}")
+
+                print({
+                    "message": event['Records'][0]['Sns']['Message'],
+                    "status_code": resp.status,
+                    "response": resp.data
+                })
+  StoppedInstancesSNSToSlackLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: 'StoppedInstancesSNSToSlackLambdaRole'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        - PolicyName: StoppedInstancesSNSToSlack-LambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ssm:GetParameter"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/patch-management/slack-notifications/webhook-url"
+              - Effect: Allow
+                Action:
+                  - "kms:Encrypt"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/patch-management/slack-notifications/webhook-url"        
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${NamePrefix}-patch-stop:log-stream:*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${NamePrefix}-patch-stop"
+  StoppedInstancesSNSToSlackLambdaFunctionAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref StoppedInstancesSNSToSlackLambdaFunction
+      FunctionVersion: '$LATEST'
+      Name: live
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${NamePrefix}-PatchStoppedInstancesNotificationsSNS"
+      TopicName: !Sub "${NamePrefix}-PatchStoppedInstancesNotificationsSNS"
+      Subscription:
+        - Endpoint: !Ref StoppedInstancesSNSToSlackLambdaFunctionAlias
+          Protocol: lambda
+  SNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: PatchSNSTopicPolicy
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PatchSNSTopicPolicyPublish
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - sns:Publish
+            Resource: !Ref SNSTopic
+            Condition:
+              StringLike:
+                aws:PrincipalOrgID: o-idmzxk2nck
+          - Sid: PatchSNSTopicPolicyManage
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - sns:GetTopicAttributes
+              - sns:SetTopicAttributes
+              - sns:AddPermission
+              - sns:RemovePermission
+              - sns:DeleteTopic
+              - sns:Subscribe
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+            Resource: !Ref SNSTopic
+            Condition:
+              StringLike:
+                aws:SourceOwner: !Ref "AWS::AccountId"
+      Topics:
+        - !Ref SNSTopic
+  StoppedInstancesToSlackLambdaRolePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName:
+        Ref: StoppedInstancesSNSToSlackLambdaFunctionAlias
+      Action: "lambda:InvokeFunction"
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SNSTopic

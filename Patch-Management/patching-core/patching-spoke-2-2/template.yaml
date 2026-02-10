@@ -1,0 +1,259 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+## Patching baseline setting
+  WindowsPatchBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: WindowsOS
+      Description: Baseline containing all updates approved for Windows Dev instances
+      OperatingSystem: WINDOWS
+      PatchGroups:
+      - Prod
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Critical
+              - Important
+              Key: MSRC_SEVERITY
+            - Values:
+              - SecurityUpdates
+              - CriticalUpdates
+              Key: CLASSIFICATION
+            - Values:
+              - WindowsServer2012
+              - WindowsServer2012R2
+              - WindowsServer2016
+              - WindowsServer2019
+              Key: PRODUCT
+          ApproveAfterDays: 28
+          ComplianceLevel: CRITICAL
+
+  LinuxOSBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: LinuxOS
+      Description: Baseline containing all updates approved for amazonLinux instances
+      OperatingSystem: AMAZON_LINUX_2
+      PatchGroups:
+      - Prod
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Critical
+              - Important
+              Key: SEVERITY
+            - Values:
+              - Bugfix
+              - Security
+              Key: CLASSIFICATION
+          ApproveAfterDays: 28
+          ComplianceLevel: CRITICAL
+
+  AmazonLinux2023Baseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: AmazonLinux2023
+      Description: Baseline containing all updates approved for amazonLinux instances
+      OperatingSystem: AMAZON_LINUX_2023
+      PatchGroups:
+      - Prod
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Critical
+              - Important
+              - Medium
+              Key: SEVERITY
+            - Values:
+              - Bugfix
+              - Security
+              Key: CLASSIFICATION
+          ApproveAfterDays: 28
+          ComplianceLevel: CRITICAL
+
+  RedHatLinuxOSBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: RedHatLinuxOS
+      Description: Baseline containing all updates approved for amazonLinux instances
+      OperatingSystem: REDHAT_ENTERPRISE_LINUX
+      PatchGroups:
+      - Prod
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Critical
+              - Important
+              Key: SEVERITY
+            - Values:
+              - Bugfix
+              - Security
+              Key: CLASSIFICATION
+          ApproveAfterDays: 28
+          ComplianceLevel: CRITICAL
+
+  UbuntuOSBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: UbuntuOS
+      Description: Baseline containing all updates approved for amazonLinux instances
+      OperatingSystem: UBUNTU
+      PatchGroups:
+      - Prod
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Required
+              - Important
+              - Standard
+              Key: PRIORITY
+            - Values:
+              - All
+              Key: SECTION
+          ApproveAfterDays: 28
+          ComplianceLevel: CRITICAL
+
+  WindowsPatchDevBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: WindowsOS-Dev
+      Description: Baseline containing all updates approved for Windows Dev instances
+      OperatingSystem: WINDOWS
+      PatchGroups:
+      - Dev
+      - Test
+      - Default
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Critical
+              - Important
+              - Moderate
+              Key: MSRC_SEVERITY
+            - Values:
+              - SecurityUpdates
+              - CriticalUpdates
+              Key: CLASSIFICATION
+            - Values:
+              - WindowsServer2012
+              - WindowsServer2012R2
+              - WindowsServer2016
+              - WindowsServer2019
+              Key: PRODUCT
+          ApproveAfterDays: 7
+          ComplianceLevel: CRITICAL
+
+  LinuxOSDevBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: LinuxOS-Dev
+      Description: Baseline containing all updates approved for amazonLinux instances
+      OperatingSystem: AMAZON_LINUX_2
+      PatchGroups:
+      - Dev
+      - Test
+      - Default
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Critical
+              - Important
+              - Medium
+              Key: SEVERITY
+            - Values:
+              - Bugfix
+              - Security
+              Key: CLASSIFICATION
+          ApproveAfterDays: 7
+          ComplianceLevel: CRITICAL
+
+  AmazonLinux2023DevBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: AmazonLinux2023-Dev
+      Description: Baseline containing all updates approved for amazonLinux instances
+      OperatingSystem: AMAZON_LINUX_2023
+      PatchGroups:
+      - Dev
+      - Test
+      - Default
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Critical
+              - Important
+              - Medium
+              Key: SEVERITY
+            - Values:
+              - Bugfix
+              - Security
+              Key: CLASSIFICATION
+          ApproveAfterDays: 7
+          ComplianceLevel: CRITICAL
+
+  RedHatLinuxOSDevBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: RedHatLinuxOS-Dev
+      Description: Baseline containing all updates approved for amazonLinux instances
+      OperatingSystem: REDHAT_ENTERPRISE_LINUX
+      PatchGroups:
+      - Dev
+      - Test
+      - Default
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Critical
+              - Important
+              - Moderate
+              Key: SEVERITY
+            - Values:
+              - Bugfix
+              - Security
+              Key: CLASSIFICATION
+          ApproveAfterDays: 7
+          ComplianceLevel: CRITICAL
+
+  UbuntuOSDevBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Properties:
+      Name: UbuntuOS-Dev
+      Description: Baseline containing all updates approved for amazonLinux instances
+      OperatingSystem: UBUNTU
+      PatchGroups:
+      - Dev
+      - Test
+      - Default
+      ApprovalRules:
+        PatchRules:
+        - PatchFilterGroup:
+            PatchFilters:
+            - Values:
+              - Required
+              - Important
+              - Standard
+              Key: PRIORITY
+            - Values:
+              - All
+              Key: SECTION
+          ApproveAfterDays: 7
+          ComplianceLevel: CRITICAL

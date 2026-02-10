@@ -1,0 +1,26 @@
+stack_name: AllCloud-PatchMGMT-InstanceProfiles-Function
+depends_on: AllCloud-PatchMGMT-InstanceProfiles
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yaml
+
+params:
+  NamePrefix: <NAME_PREFIX>
+  SNSEnabled: "true"
+  SNSTopic: "arn:aws:sns:<REGION>:<AUDIT_ACCOUNT_ID>:<SNS_TOPIC_NAME>"
+  AutomationName: "SSMPolicies"
+  PatchInstanceS3ManagedPolicyName: "PatchInstanceS3ManagedPolicy"
+  InstanceProfileName: "<NAME_PREFIX>-PatchInstanceProfile"
+  PatchInstanceRoleName: "<NAME_PREFIX>-PatchInstanceRole"
+
+targets: # Target Account/OU where this needs to be deployed
+  - <WORKLOAD_ACCOUNT>
+
+
+regions:
+  - global_main-region
+
+tags:
+  - Key: Config
+    Value: "AllCloud-PatchMGMT-InstanceProfiles-Function"

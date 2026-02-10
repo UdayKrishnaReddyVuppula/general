@@ -1,0 +1,10 @@
+stack_name: patch-stopped-instances-snstoslack-lambda
+type: cloudformation
+targets:
+  - <AUDIT_ACCOUNT>
+properties:
+  cloudformation:
+    template_name: template.yml
+params:
+  NamePrefix: aws-controltower
+  SlackChannel: "#cust-phoenix-patch-mgmt-notifications"

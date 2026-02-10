@@ -1,0 +1,21 @@
+stack_name: AllCloud-PatchMGMT-sandbox-MaintenanceWindow
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yaml
+
+params:
+  NamePrefix: <NAME_PREFIX>
+  Schedule: "cron(0 20 ? * Sun#3 *)"
+  ASGLambdaPayloadBase64: "ewogICJwYXRjaGluZ3BoYXNlIjogInBhdGNoaW5ncGhhc2UxIiwKICAicmV0YWluX2hlYWx0aHlfcGVyY2VudGFnZSI6ICI5MCIsCiAgInJlZnJlc2hfYXNnX2luc3RhbmNlcyI6ICJZZXMiLAogICJwYXRjaGluZ19vcGVyYXRpb24iOiAiSW5zdGFsbCIsCiAgInJ1bl9wYXRjaF9iYXNlbGluZV9pbnN0YWxsX292ZXJyaWRlX2xpc3QiOiAiIgp9"
+  LambdaPayloadBase64: "ewogICJwYXRjaGluZ3BoYXNlIjogInNhbmRib3giLAogICJwYXRjaGluZ19vcGVyYXRpb24iOiAiSW5zdGFsbCIsCiAgIm9wZXJhdGlvbl9wb3N0X3BhdGNoaW5nIjogIlJlYm9vdElmTmVlZGVkIiwKICAicnVuX3BhdGNoX2Jhc2VsaW5lX2luc3RhbGxfb3ZlcnJpZGVfbGlzdCI6ICIiCn0="
+  CustomPatchingTagValue: "sandbox" ##This value will be assigned to Maintainancewindow as sandbox_maintainance_window. update as required.
+targets: # update according to client needs
+  - <WORKLOAD_ACCOUNT>
+
+regions: # update according to client needs
+  - global_main-region
+
+tags:
+  - Key: Config
+    Value: "AllCloud-PatchMGMT-sandbox"

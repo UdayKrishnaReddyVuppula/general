@@ -1,0 +1,617 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Function used to manage stopped instances during the patch management maintenance window."
+Parameters:
+  NamePrefix:
+    Type: String
+  PatchGroup:
+    Type: String
+    Description: "The patch group to target for patching."
+  MaintenanceWindowName:
+    Type: String
+    Description: "The name of the maintenance window used for patching."
+  StartSchedule:
+    Type: String
+    Description: "CRON expression for instance start schedule."
+  EndSchedule:
+    Type: String
+    Description: "CRON expression for instance stop schedule."
+  VCPUsResizeNumber:
+    Type: String
+    Description: "Minimum number of vCPUs, if an instance has more it will be resized to a type of the same family which has this number of vCPUs (or the smallest if all are over)"
+    Default: "8"
+  ResizeLinuxInstances:
+    Type: String
+    AllowedValues: [ "true", "false" ]
+    Description: "Resize Linux instances."
+    Default: "false"
+  SNSTopicArn:
+    Type: String
+    Description: "The SNS topic ARN for notifications."
+  AutomationName:
+    Type: String
+    Description: 'Name of the automation to be used for the slack notifications.'
+    Default: 'Automations'
+Resources:
+  StoppedInstancesLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-PatchMGMT-Stopped-Inst-${PatchGroup}-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub "${NamePrefix}-patch-stopped-instances-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${NamePrefix}-PatchMGMT-Stop-Instances-${PatchGroup}:*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${NamePrefix}-PatchMGMT-Stop-Instances-${PatchGroup}"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${NamePrefix}-PatchMGMT-Start-Instances-${PatchGroup}:*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${NamePrefix}-PatchMGMT-Start-Instances-${PatchGroup}"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  Ref: SNSTopicArn
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceTypes
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:CreateGrant
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
+                Resource: arn:aws:kms:eu-west-1:526407903756:key/*
+                Condition:
+                  Bool:
+                    kms:GrantIsForAWSResource: "true"
+              - Effect: Allow
+                Action:
+                  - ec2:ModifyInstanceAttribute
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ec2:Attribute: InstanceType
+                  StringLike:
+                    "aws:ResourceTag/PatchGroup": !Ref PatchGroup
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DescribeTags
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    "aws:ResourceTag/PatchGroup": !Ref PatchGroup
+  StartInstancesPermissionToCallLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StartInstancesLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt StartInstancesScheduledRule.Arn
+  StopInstancesPermissionToCallLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StopInstancesLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt StopInstancesScheduledRule.Arn
+  StartInstancesScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule for StartInstancesLambda"
+      ScheduleExpression: !Sub "cron(${StartSchedule})"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt StartInstancesLambda.Arn
+          Id: "patch-start-instances"
+  StopInstancesScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule for StopInstancesLambda"
+      ScheduleExpression: !Sub "cron(${EndSchedule})"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt StopInstancesLambda.Arn
+          Id: "patch-stop-instances"
+  StartInstancesLambdaFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${StartInstancesLambda}
+      RetentionInDays: 14
+  StopInstancesLambdaFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${StopInstancesLambda}
+      RetentionInDays: 14
+  StartInstancesLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-PatchMGMT-Start-Instances-${PatchGroup}"
+      Description: "Starts stopped instances before the maintenance window."
+      Handler: index.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Role: !GetAtt StoppedInstancesLambdaRole.Arn
+      Runtime: python3.12
+      Environment:
+        Variables:
+          PATCH_GROUP: !Ref PatchGroup
+          MAINTENANCE_WINDOW: !Ref MaintenanceWindowName
+          VCPUS_RESIZE_NUMBER: !Ref VCPUsResizeNumber
+          RESIZE_LINUX_INSTANCES: !Ref ResizeLinuxInstances
+          SNS_TOPIC: !Ref SNSTopicArn
+          AUTOMATION_NAME: !Ref AutomationName
+          LOG_LEVEL: "INFO"
+      Code:
+        ZipFile: |
+            import boto3
+            import json
+            import os
+            import time
+            import logging
+            import botocore
+
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+
+            if os.environ.get('LOG_LEVEL') == 'DEBUG':
+                logger.setLevel(logging.DEBUG)
+            if os.environ.get('LOG_LEVEL') == 'INFO':
+                logger.setLevel(logging.INFO)
+            if os.environ.get('LOG_LEVEL') == 'ERROR':
+                logger.setLevel(logging.ERROR)
+
+            sns_topic = os.environ['SNS_TOPIC']
+            automation_name = os.environ['AUTOMATION_NAME']
+
+
+            def sns_log(account_id=None, resource_id=None, error=None, extra_information=None):
+                topic_region = sns_topic.split(":")[3]
+                sns_client = boto3.client('sns', region_name=topic_region)
+
+                message = {
+                    "AppName": automation_name,
+                    "AccountId": account_id,
+                    "ResourceId": resource_id,
+                    "Error": error,
+                    "ExtraInformation": extra_information,
+                    "Timestamp": time.time()
+                }
+
+                logger.info(message)
+                sns_client.publish(
+                    TargetArn=sns_topic,
+                    Message=json.dumps({'default': json.dumps(message)}),
+                    MessageStructure='json')
+
+
+            def resize_instances(ec2_client, instances, vcpus_resize_number):
+                for instance in instances:
+                    if instance.get('Platform') == 'windows':
+                        logger.info(f"Instance {instance['InstanceId']} is a Windows instance, skipping resizing...")
+                        continue
+
+                    main_instance_type = instance['InstanceType']
+                    main_instance_family = main_instance_type.split(".")[0]
+                    main_instance_type_data = None
+
+                    family_instances = []
+                    response = ec2_client.describe_instance_types()
+                    while True:
+                        for instance_type in response['InstanceTypes']:
+                            if instance_type["InstanceType"].split('.')[0] == main_instance_family:
+                                family_instances.append({
+                                    "type": instance_type["InstanceType"],
+                                    "vcpus": instance_type["VCpuInfo"]["DefaultVCpus"],
+                                    "gpu": True if instance_type.get("GpuInfo") else False
+                                })
+                            if instance_type["InstanceType"] == main_instance_type:
+                                main_instance_type_data = {
+                                    "type": instance_type["InstanceType"],
+                                    "vcpus": instance_type["VCpuInfo"]["DefaultVCpus"],
+                                    "gpu": True if instance_type.get("GpuInfo") else False
+                                }
+
+                        if 'NextToken' not in response:
+                            break
+
+                        response = ec2_client.describe_instance_types(
+                            NextToken=response['NextToken']
+                        )
+
+                    if main_instance_type_data is None:
+                        logger.error(f"Could not find instance type {main_instance_type} for instance {instance['InstanceId']}")
+                        continue
+
+                    new_instance_type = None
+
+                    if main_instance_type_data['gpu']:
+                        logger.debug(f"Instance {instance['InstanceId']} has GPU, resizing to a default type...")
+                        architecture = instance['Architecture']
+
+                        if architecture == 'x86_64':
+                            new_instance_type = 't3.large'
+                        elif architecture == 'arm64':
+                            new_instance_type = 't4g.large'
+                        else:
+                            logger.error(f"Architecture {architecture} for GPU instance not supported, continue with main family.")
+
+                    if not new_instance_type:
+                        family_instances.sort(key=lambda x: x["vcpus"])
+                        current_vcpus = main_instance_type_data['vcpus']
+
+                        if current_vcpus is None:
+                            raise Exception(f"Could not find instance type {main_instance_type} for instance {instance['InstanceId']}")
+
+                        if current_vcpus <= vcpus_resize_number:
+                            logger.debug(f"Instance {instance['InstanceId']} has {current_vcpus} vcpus, skipping resizing...")
+                            continue
+
+                        new_instance_type = next((i["type"] for i in family_instances if ".medium" in i["type"]), None)
+                        if new_instance_type is None:
+                            new_instance_type = next((i["type"] for i in family_instances if ".large" in i["type"]), None)
+                            if new_instance_type is None:
+                                new_instance_type = family_instances[0]["type"]
+
+                    ec2_client.modify_instance_attribute(InstanceId=instance['InstanceId'],
+                                                        InstanceType={'Value': new_instance_type})
+
+                    logger.info("Instance {} resized to {}".format(instance['InstanceId'], new_instance_type))
+
+                    ec2_client.create_tags(
+                        DryRun=False,
+                        Resources=[instance['InstanceId']],
+                        Tags=[
+                            {
+                                'Key': 'instance_type_changed_by_patch_mgmt',
+                                'Value': main_instance_type
+                            }
+                        ]
+                    )
+
+
+            def resize_failed_instance(ec2_client, instance):
+                architecture = instance['Architecture']
+
+                if architecture == 'x86_64':
+                    new_instance_type = 't3.large'
+                elif architecture == 'arm64':
+                    new_instance_type = 't4g.large'
+                else:
+                    logger.error(f"Architecture {architecture} for failed instance not supported, aborting...")
+                    return
+
+                ec2_client.modify_instance_attribute(InstanceId=instance['InstanceId'],
+                                                    InstanceType={'Value': new_instance_type})
+
+                logger.info("Instance {} resized to {}".format(instance['InstanceId'], new_instance_type))
+
+                main_instance_type = instance['InstanceType']
+                ec2_client.create_tags(
+                    DryRun=False,
+                    Resources=[instance['InstanceId']],
+                    Tags=[
+                        {
+                            'Key': 'instance_type_changed_by_patch_mgmt',
+                            'Value': main_instance_type
+                        }
+                    ]
+                )
+
+
+            def start_instance(ec2_client, instance):
+                try:
+                    ec2_client.start_instances(InstanceIds=[instance['InstanceId']], DryRun=False)
+                except botocore.exceptions.ClientError as e:
+                    if e.response['Error']['Code'] == 'InsufficientInstanceCapacity' or 'LimitExceeded' in e.response['Error']['Code']:
+                        logger.error(f"Error: Insufficient instance capacity for instance {instance['InstanceId']}")
+                        logger.error("Changing the instance type and retrying...")
+                        resize_failed_instance(ec2_client, instance)
+                        time.sleep(5)
+                        ec2_client.start_instances(InstanceIds=[instance['InstanceId']], DryRun=False)
+                    else:
+                        raise
+
+                ec2_client.create_tags(
+                    DryRun=False,
+                    Resources=[instance['InstanceId']],
+                    Tags=[
+                        {
+                            'Key': 'started_by_patch_mgmt',
+                            'Value': 'yes'
+                        }
+                    ]
+                )
+
+
+            def get_eligible_instances(ec2_client, patch_group, maintenance_window):
+                instances_to_start = []
+                instances = ec2_client.describe_instances()
+
+                for reservation in instances['Reservations']:
+                    for instance in reservation['Instances']:
+                        if instance['State']['Name'] == 'stopped':
+                            skip = False
+                            tags_found = False
+                            for tag in instance['Tags']:
+                                if tag['Key'] == 'install_patch':
+                                    if tag['Value'] == 'no':
+                                        skip = True
+                                if tag['Key'] == 'PatchGroup':
+                                    if tag['Value'] != patch_group:
+                                        skip = True
+                                if tag['Key'] == 'maintenance_window':
+                                    if tag['Value'] != maintenance_window:
+                                        skip = True
+                                    tags_found = True
+                            if skip or not tags_found:
+                                continue
+
+                            instances_to_start.append(instance)
+
+                return instances_to_start
+
+
+            def lambda_handler(event, context):
+                account_id = ""
+
+                try:
+                    logger.info("Getting parameters...")
+                    account_id = context.invoked_function_arn.split(":")[4]
+                    region = context.invoked_function_arn.split(":")[3]
+                    patch_group = os.environ.get('PATCH_GROUP')
+                    maintenance_window = os.environ.get('MAINTENANCE_WINDOW')
+                    resize_linux_instances = os.environ.get('RESIZE_LINUX_INSTANCES') == 'true'
+                    vcpus_resize_number = int(os.environ.get('VCPUS_RESIZE_NUMBER'))
+                except Exception as e:
+                    logger.error("Failed getting parameters with error {}".format(e))
+                    sns_log(account_id=account_id, resource_id=context.invoked_function_arn, error=str(e), extra_information="")
+                    return
+
+                try:
+                    ec2_client = boto3.client("ec2", region_name=region)
+                    instances_to_start = get_eligible_instances(ec2_client, patch_group, maintenance_window)
+                    logger.debug("Instances to start: {}".format(instances_to_start))
+                    if len(instances_to_start) > 0:
+                        if resize_linux_instances:
+                            logger.info("Resizing instances...")
+                            resize_instances(ec2_client, instances_to_start, vcpus_resize_number)
+                        logger.info("Starting instances...")
+                        for instance in instances_to_start:
+                            start_instance(ec2_client, instance)
+                except Exception as e:
+                    logger.error("Failed starting instances with error {}".format(e))
+                    sns_log(account_id=account_id, resource_id=context.invoked_function_arn, error=str(e), extra_information=None)
+
+
+  StopInstancesLambda:
+    Type: AWS::Lambda::Function
+    # noinspection YamlFormatViolation
+    # noinspection YAMLSchemaValidation
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-PatchMGMT-Stop-Instances-${PatchGroup}"
+      Description: "Stops started instances after the maintenance window."
+      Handler: index.lambda_handler
+      MemorySize: 512
+      Timeout: 900
+      Role: !GetAtt StoppedInstancesLambdaRole.Arn
+      Runtime: python3.12
+      Environment:
+        Variables:
+          PATCH_GROUP: !Ref PatchGroup
+          MAINTENANCE_WINDOW: !Ref MaintenanceWindowName
+          RESIZE_LINUX_INSTANCES: !Ref ResizeLinuxInstances
+          SNS_TOPIC: !Ref SNSTopicArn
+          AUTOMATION_NAME: !Ref AutomationName
+          LOG_LEVEL: "INFO"
+      Code:
+        ZipFile: |
+            import boto3
+            import json
+            import os
+            import time
+            import logging
+
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+
+            if os.environ.get('LOG_LEVEL') == 'DEBUG':
+                logger.setLevel(logging.DEBUG)
+            if os.environ.get('LOG_LEVEL') == 'INFO':
+                logger.setLevel(logging.INFO)
+            if os.environ.get('LOG_LEVEL') == 'ERROR':
+                logger.setLevel(logging.ERROR)
+
+            sns_topic = os.environ['SNS_TOPIC']
+            automation_name = os.environ['AUTOMATION_NAME']
+
+
+            def sns_log(account_id=None, resource_id=None, error=None, extra_information=None):
+                topic_region = sns_topic.split(":")[3]
+                sns_client = boto3.client('sns', region_name=topic_region)
+
+                message = {
+                    "AppName": automation_name,
+                    "AccountId": account_id,
+                    "ResourceId": resource_id,
+                    "Error": error,
+                    "ExtraInformation": extra_information,
+                    "Timestamp": time.time()
+                }
+
+                logger.info(message)
+                sns_client.publish(
+                    TargetArn=sns_topic,
+                    Message=json.dumps({'default': json.dumps(message)}),
+                    MessageStructure='json')
+
+
+            def resize_instances(ec2_client, instances):
+                instance_ids = [instance['InstanceId'] for instance in instances]
+                ec2_client.get_waiter('instance_stopped').wait(InstanceIds=instance_ids)
+
+                for instance in instances:
+                    original_instance_type = ''
+
+                    if instance.get('Platform') == 'windows':
+                        logger.info(f"Instance {instance['InstanceId']} is a Windows instance, skipping resizing...")
+                        continue
+
+                    for tag in instance['Tags']:
+                        if tag['Key'] == 'instance_type_changed_by_patch_mgmt':
+                            original_instance_type = tag['Value']
+                            if original_instance_type == 'false':
+                                original_instance_type = None
+
+                    if original_instance_type:
+                        ec2_client.modify_instance_attribute(InstanceId=instance['InstanceId'],
+                                                            InstanceType={'Value': original_instance_type})
+                        logger.info("Instance {} resized to {}".format(instance['InstanceId'], original_instance_type))
+
+                        ec2_client.create_tags(
+                            DryRun=False,
+                            Resources=[instance['InstanceId']],
+                            Tags=[
+                                {
+                                    'Key': 'instance_type_changed_by_patch_mgmt',
+                                    'Value': 'false'
+                                }
+                            ]
+                        )
+
+
+            def stop_instance(ec2_client, instance):
+                ec2_client.stop_instances(InstanceIds=[instance['InstanceId']], DryRun=False)
+
+                ec2_client.create_tags(
+                    DryRun=False,
+                    Resources=[instance['InstanceId']],
+                    Tags=[
+                        {
+                            'Key': 'started_by_patch_mgmt',
+                            'Value': 'no'
+                        }
+                    ]
+                )
+
+
+            def get_eligible_instances(ec2_client, patch_group, maintenance_window):
+                instances_to_stop = []
+                instances = ec2_client.describe_instances()
+
+                for reservation in instances['Reservations']:
+                    for instance in reservation['Instances']:
+                        if instance['State']['Name'] == 'running':
+                            skip = False
+                            okay = False
+                            tags_found = False
+                            for tag in instance['Tags']:
+                                if tag['Key'] == 'install_patch':
+                                    if tag['Value'] == 'no':
+                                        skip = True
+                                if tag['Key'] == 'started_by_patch_mgmt':
+                                    if tag['Value'] == 'yes':
+                                        okay = True
+                                if tag['Key'] == 'PatchGroup':
+                                    if tag['Value'] != patch_group:
+                                        skip = True
+                                if tag['Key'] == 'maintenance_window':
+                                    if tag['Value'] != maintenance_window:
+                                        skip = True
+                                    tags_found = True
+                            if not okay:
+                                continue
+                            if skip or not tags_found:
+                                continue
+                            instances_to_stop.append(instance)
+
+                return instances_to_stop
+
+
+            def get_resized_stopped_instances(ec2_client, patch_group, maintenance_window):
+                instances_to_resize = []
+                instances = ec2_client.describe_instances()
+
+                for reservation in instances['Reservations']:
+                    for instance in reservation['Instances']:
+                        if instance['State']['Name'] == 'stopped':
+                            skip = False
+                            okay = False
+                            tags_found = False
+                            for tag in instance['Tags']:
+                                if tag['Key'] == 'install_patch':
+                                    if tag['Value'] == 'no':
+                                        skip = True
+                                if tag['Key'] == 'PatchGroup':
+                                    if tag['Value'] != patch_group:
+                                        skip = True
+                                if tag['Key'] == 'maintenance_window':
+                                    if tag['Value'] != maintenance_window:
+                                        skip = True
+                                    tags_found = True
+                                if tag['Key'] == 'instance_type_changed_by_patch_mgmt':
+                                    if tag['Value'] != 'false':
+                                        okay = True
+                            if not okay:
+                                continue
+                            if skip or not tags_found:
+                                continue
+                            instances_to_resize.append(instance)
+
+                return instances_to_resize
+
+
+            def lambda_handler(event, context):
+                account_id = ""
+
+                try:
+                    logger.info("Getting parameters...")
+                    account_id = context.invoked_function_arn.split(":")[4]
+                    region = context.invoked_function_arn.split(":")[3]
+                    patch_group = os.environ.get('PATCH_GROUP')
+                    maintenance_window = os.environ.get('MAINTENANCE_WINDOW')
+                    resize_linux_instances = os.environ.get('RESIZE_LINUX_INSTANCES') == 'true'
+                except Exception as e:
+                    logger.error("Failed getting parameters with error {}".format(e))
+                    sns_log(account_id=account_id, resource_id=context.invoked_function_arn, error=str(e), extra_information="")
+                    return
+
+                try:
+                    ec2_client = boto3.client("ec2", region_name=region)
+                    instances_to_stop = get_eligible_instances(ec2_client, patch_group, maintenance_window)
+                    logger.debug("Instances to stop: {}".format(instances_to_stop))
+                    if len(instances_to_stop) > 0:
+                        logger.info("Stopping instances...")
+                        for instance in instances_to_stop:
+                            stop_instance(ec2_client, instance)
+                    if resize_linux_instances:
+                        logger.info("Resizing instances...")
+                        if instances_to_stop:
+                            resize_instances(ec2_client, instances_to_stop)
+                        logger.info("Resizing stopped instances...")
+                        instances_to_resize = get_resized_stopped_instances(ec2_client, patch_group, maintenance_window)
+                        if instances_to_resize:
+                            resize_instances(ec2_client, instances_to_resize)
+                except Exception as e:
+                    logger.error("Failed stopping instances with error {}".format(e))
+                    sns_log(account_id=account_id, resource_id=context.invoked_function_arn, error=str(e), extra_information=None)

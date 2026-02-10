@@ -1,0 +1,12 @@
+stack_name: AllCloud-patching-snapshot
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yml
+params:
+  CustomPatchingTagValue: "<PATCHING_TAG_VALUE>" #PatchingKey to be used for tagging
+  NotificationSNSTopicName: "arn:aws:sns:us-east-1:<AUDIT_ACCOUNT_ID>:<SNS_TOPIC_NAME>" #Name of the SNS topic for notifications from Audit Account. same as from pre-post-nitification
+targets:
+  - <WORKLOAD_ACCOUNT>
+regions:
+  - global_main-region

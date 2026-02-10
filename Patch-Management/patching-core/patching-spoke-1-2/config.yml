@@ -1,0 +1,25 @@
+stack_name: AllCloud-PatchMGMT-Spoke-1-2
+type: cloudformation
+depends_on: AllCloud-PatchMGMT-Main
+properties:
+  cloudformation:
+    template_name: template.yaml
+    
+params:
+  ArtifactBucket: patch-mgmt-<AUDIT_ACCOUNT_ID>-<REGION>
+  WorkloadRegions: <REGION>
+  PatchingTemplateStackAccountId: "<AUDIT_ACCOUNT_ID>"
+  PatchingExecutionLogsBucketName: patching-execution-logs-<REGION>-<AUDIT_ACCOUNT_ID>
+  ManagedInstancesDataBucketName: managed-instances-data-<REGION>-<AUDIT_ACCOUNT_ID>
+  PatchingTemplateStackRegion: <REGION>
+  ManagedInstancesDataEncryptionKey: "arn:aws:kms:<REGION>:<AUDIT_ACCOUNT_ID>:key/<KMS_KEY_ID>" #update as required
+  BaselineOverrideBucket: "arn:aws:s3:::patch-baseline-override-<REGION>-<AUDIT_ACCOUNT_ID>"
+  SNSTopic: "arn:aws:sns:eu-central-1:<AUDIT_ACCOUNT_ID>:aws-controltower-AutomationsSNSToSlack"
+  AutomationName: "PatchMGMT"
+  CustomPatchingTagKey: "patch.allcloud.io:phase" #PatchingKey to be used for tagging.(env/patchphase/etc., update as required)
+
+
+targets: # Target Account/OU where this needs to be deployed
+  - <WORKLOAD_ACCOUNT>
+regions:
+  - global_main-region

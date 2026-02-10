@@ -1,0 +1,22 @@
+stack_name: patch-stopped-instances
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yaml
+    
+params:
+  NamePrefix: AllCloud-PatchMGMT
+  PatchGroup: cycle1
+  MaintenanceWindowName: cycle1_maintenance_window
+  StartSchedule: "24 22 ? * 2 *"
+  EndSchedule: "24 22 ? * 3 *"
+  ResizeLinuxInstances: "true"
+  VCPUsResizeNumber: "8"
+  AutomationName: "PatchMGMT-StoppedInstances"
+  SNSTopicArn: "arn:aws:sns:eu-west-1:212760635124:AllCloud-PatchMGMT-NotificationSNSTopicName"
+  
+targets: # Target Account/OU where this needs to be deployed
+  - global_dev
+  
+regions:
+  - global_main-region

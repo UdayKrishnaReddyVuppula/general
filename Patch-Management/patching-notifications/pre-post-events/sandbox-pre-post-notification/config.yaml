@@ -1,0 +1,25 @@
+stack_name: Sandbox-rules
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yaml
+
+params:
+  PhaseName: sandbox_maintenance_window
+  LambdaTargetArn: arn:aws:lambda:us-east-1:<AUDIT_ACCOUNT_ID>:function:<NOTIFICATION_LAMBDA_FUNCTION_NAME>
+  ActualMWCron: "cron(0 20 ? * Sun#3 *)"
+  PreSchedule: "cron(0 20 ? * Sun#2 *)"
+  PostSchedule: "cron(0 23 ? * Mon#4 *)"
+  WindowNames: '["sandbox_maintenance_window"]' #If you have only 1 Maintainance Window You can update it.
+  SNSArn: arn:aws:sns:us-east-1:<AUDIT_ACCOUNT_ID>:<SNS_TOPIC_NAME>
+  AwsAccounts: "<SPOKE_ACCOUNT_ID>" # multiple accounts can be provided comma separated
+
+targets: # Target Account/OU where this needs to be deployed
+  - <AUDIT_ACCOUNT>
+
+regions:
+  - global_main-region
+
+tags:
+  - Key: Config
+    Value: "AllCloud-PatchMGMT-notification"

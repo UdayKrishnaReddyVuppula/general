@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'The AWS CloudFormation template for automating the attachment of the required policies to EC2 instances.'
+Parameters:
+  NamePrefix:
+    Type: String
+Resources:
+  PatchInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${NamePrefix}-PatchInstanceRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonSSMPatchAssociation
+      Path: /
+  PatchInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      InstanceProfileName: !Sub ${NamePrefix}-PatchInstanceProfile
+      Roles:
+        - !Ref 'PatchInstanceRole'
+  PatchInstanceS3ManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: PatchInstanceS3ManagedPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:GetEncryptionConfiguration
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+            Resource:
+              - "arn:aws:s3:::patching-execution-logs-<REGION>-<audit_account_id>"
+              - "arn:aws:s3:::patching-execution-logs-<REGION>-<audit_account_id>/*"
+          - Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:GetEncryptionConfiguration
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+            Resource:
+              - "arn:aws:s3:::patch-baseline-override-<REGION>-<audit_account_id>"
+              - "arn:aws:s3:::patch-baseline-override-<REGION>-<audit_account_id>/*"
+              - "arn:aws:s3:::patch-baseline-override-il-central-1-<audit_account_id>"
+              - "arn:aws:s3:::patch-baseline-override-il-central-1-<audit_account_id>/*"
+
+      Roles:
+        - !Ref 'PatchInstanceRole'

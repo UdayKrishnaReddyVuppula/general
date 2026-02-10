@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'The AWS CloudFormation template for automating the attachment of the required policies to EC2 instances.'
+Parameters:
+  NamePrefix:
+    Type: String
+  SNSEnabled:
+    Type: String
+    Description: 'Boolean parameter used to decide if errors should be sent to an SNS topic'
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  SNSTopic:
+    Type: String
+    Description: 'SNS topic arn to which errors should be sent.'
+    Default: ''
+  AutomationName:
+    Type: String
+    Description: 'Name of the automation to be used for the slack notifications.'
+    Default: 'Automations'
+  PatchInstanceS3ManagedPolicyName:
+    Type: String
+    Description: 'Name of the S3 managed policy created in the Role stack.'
+  PatchInstanceRoleName:
+    Type: String
+    Description: 'Name of the role created in the Role stack.'
+  InstanceProfileName:
+    Type: String
+    Description: 'Name of the instance profile created in the Role stack.'
+Resources:
+  InstanceProfileMonitoringConfigRule:
+    DependsOn: PermissionForEventsToInvokeLambda
+    Type: 'AWS::Config::ConfigRule'
+    Properties:
+      ConfigRuleName: EC2InstanceProfileAttached
+      Description: Checks whether your instances have a profile attached.
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::EC2::Instance'
+      Source:
+        Owner: AWS
+        SourceIdentifier: EC2_INSTANCE_PROFILE_ATTACHED
+  InstanceProfileMonitoringEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "If profile is not attached to particular Ec2 Instance then EventRule will invoke lambda to attach specific profile"
+      EventPattern:
+          {
+                "detail-type": ["Config Rules Compliance Change"],
+                "source": ["aws.config"],
+                "detail": {
+                  "configRuleName": [EC2InstanceProfileAttached],
+                  "messageType": ["ComplianceChangeNotification"]
+                }
+              }
+      State: "ENABLED"
+      Targets:
+        - Arn:
+              Fn::GetAtt:
+                - "InstanceProfileMonitoringFunction"
+                - "Arn"
+          Id: "TargetFunctionV1"
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InstanceProfileMonitoringFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "InstanceProfileMonitoringEventRule"
+          - "Arn"
+  InstanceProfileMonitoringFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${NamePrefix}-InstProfileFnctRole-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+            - ssm.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${NamePrefix}-AllowInstanceProfileAssociation-${AWS::Region}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - ec2:AssociateIamInstanceProfile
+              Resource: '*'
+              Condition:
+                ArnEquals:
+                  ec2:NewInstanceProfile: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${InstanceProfileName}"
+            - Effect: Allow
+              Action:
+                - iam:PassRole
+              Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PatchInstanceRoleName}"
+            - Effect: Allow
+              Action:
+                - iam:GetInstanceProfile
+                - iam:ListAttachedRolePolicies
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - iam:AttachRolePolicy
+              Resource: '*'
+              Condition:
+                ArnEquals:
+                  iam:PolicyARN: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+            - Effect: Allow
+              Action:
+                - iam:AttachRolePolicy
+              Resource: '*'
+              Condition:
+                ArnEquals:
+                  iam:PolicyARN: arn:aws:iam::aws:policy/AmazonSSMPatchAssociation
+            - Effect: Allow
+              Action:
+                - iam:AttachRolePolicy
+              Resource: '*'
+              Condition:
+                ArnEquals:
+                  iam:PolicyARN: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${PatchInstanceS3ManagedPolicyName}"
+            - !If
+              - SNSToSlackCondition
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  Ref: SNSTopic
+              - Ref: AWS::NoValue
+  InstanceProfileMonitoringFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${InstanceProfileMonitoringFunction}
+      RetentionInDays: 7
+  InstanceProfileMonitoringFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${NamePrefix}-InstanceProfileMonitoringFunction
+      Handler: index.lambda_handler
+      Role: !GetAtt InstanceProfileMonitoringFunctionRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      Runtime: python3.12
+      Environment:
+        Variables:
+          INSTANCE_PROFILE_ARN: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${InstanceProfileName}"
+          S3_MANAGED_POLICY_ARN: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${PatchInstanceS3ManagedPolicyName}"
+          SNS_ENABLED: !Ref 'SNSEnabled'
+          SNS_TOPIC: !Ref 'SNSTopic'
+          AUTOMATION_NAME: !Ref 'AutomationName'
+      Code:
+        ZipFile: |
+                import json
+                import boto3
+                import os
+                import logging
+                import time
+                
+                LOGGER = logging.getLogger()
+                LOGGER.setLevel(logging.INFO)
+                CH = logging.StreamHandler()
+                CH.setLevel(logging.INFO)
+                FORMATTER = logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                CH.setFormatter(FORMATTER)
+                LOGGER.addHandler(CH)
+                
+                sns_enabled = os.environ['SNS_ENABLED']
+                if sns_enabled == 'true':
+                    sns_topic = os.environ['SNS_TOPIC']
+                    automation_name = os.environ['AUTOMATION_NAME']
+                
+                
+                def sns_log(account_id=None, resource_id=None, error=None, extra_information=None):
+                    if sns_enabled != 'true':
+                        return
+                
+                    sns_client = boto3.client('sns')
+                
+                    message = {
+                        "AppName": automation_name,
+                        "AccountId": account_id,
+                        "ResourceId": resource_id,
+                        "Error": error,
+                        "ExtraInformation": extra_information,
+                        "Timestamp": time.time()
+                    }
+                
+                    print(message)
+                    sns_client.publish(
+                        TargetArn=sns_topic,
+                        Message=json.dumps({'default': json.dumps(message)}),
+                        MessageStructure='json')
+                
+                
+                def compliance_handler(instance_id, iam_client, ec2_client):
+                    response = ec2_client.describe_iam_instance_profile_associations(Filters=[
+                        {
+                            'Name': 'instance-id',
+                            'Values': [
+                                instance_id,
+                            ]
+                        },
+                        {
+                            'Name': 'state',
+                            'Values': [
+                                'associated',
+                            ]
+                        },
+                    ], )
+                
+                    if not response['IamInstanceProfileAssociations']:
+                        return 'terminated'
+                
+                    instance_profile = response['IamInstanceProfileAssociations'][0]['IamInstanceProfile']['Arn']
+                
+                    role_name = iam_client.get_instance_profile(
+                        InstanceProfileName=instance_profile.split('instance-profile/')[1]
+                    )['InstanceProfile']['Roles'][0]['RoleName']
+                
+                    policy_arns = ['arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore',
+                                   'arn:aws:iam::aws:policy/AmazonSSMPatchAssociation']
+                    custom_policy_arn = os.environ['S3_MANAGED_POLICY_ARN']
+                    policy_arns.append(custom_policy_arn)
+                
+                    attached_policies = iam_client.list_attached_role_policies(
+                        RoleName=role_name
+                    )['AttachedPolicies']
+                
+                    attached_policies_arns = [arn['PolicyArn'] for arn in attached_policies]
+                
+                    for policy_arn in policy_arns:
+                        if policy_arn not in attached_policies_arns:
+                            response = iam_client.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+                
+                
+                def noncompliance_handler(instance_id, ec2_client):
+                    instance_profile_arn = os.environ['INSTANCE_PROFILE_ARN']
+                
+                    response = ec2_client.associate_iam_instance_profile(
+                        IamInstanceProfile={
+                            'Arn': instance_profile_arn
+                        },
+                        InstanceId=instance_id
+                    )
+                
+                    print(response)
+                
+                
+                def check_instance_state(instance_id, ec2_client):
+                    states_wait = ['pending', 'stopping']
+                    states_exit = ['shutting-down', 'terminated']
+                    states_ready = ['running', 'stopped']
+                
+                    response = ec2_client.describe_instance_status(
+                        InstanceIds=[instance_id],
+                        IncludeAllInstances=True
+                    )
+                
+                    if not response['InstanceStatuses']:
+                        return 'terminated'
+                
+                    instance_state = response['InstanceStatuses'][0]['InstanceState']['Name']
+                    if instance_state in states_wait:
+                        time.sleep(10)
+                        check_instance_state(instance_id, ec2_client)
+                
+                    response = ec2_client.describe_iam_instance_profile_associations(Filters=[
+                        {
+                            'Name': 'instance-id',
+                            'Values': [
+                                instance_id,
+                            ]
+                        },
+                        {
+                            'Name': 'state',
+                            'Values': [
+                                'associated',
+                            ]
+                        },
+                    ], )
+                
+                    if response['IamInstanceProfileAssociations']:
+                        return "compliant"
+                    if instance_state in states_ready:
+                        return "ready"
+                    if instance_state in states_exit:
+                        return "terminated"
+                
+                
+                def lambda_handler(event, context):
+                    print(event)
+                    instance_id = event['detail']['newEvaluationResult']['evaluationResultIdentifier']['evaluationResultQualifier'][
+                        'resourceId']
+                    account_id = event['account']
+                    iam_client = boto3.client('iam')
+                    ec2_client = boto3.client('ec2')
+                    status = event['detail']['newEvaluationResult']['complianceType']
+                
+                    try:
+                        if status == 'COMPLIANT' or status == 'PASSED':
+                            compliance_handler(instance_id, iam_client, ec2_client)
+                        else:
+                            instance_status = check_instance_state(instance_id, ec2_client)
+                
+                            if instance_status == "terminated":
+                                print("Instance has been terminated.")
+                                return
+                            if instance_status == "compliant":
+                                compliance_handler(instance_id, iam_client, ec2_client)
+                                return
+                            if instance_status == "ready":
+                                noncompliance_handler(instance_id, ec2_client)
+                    except Exception as e:
+                        if "InvalidInstanceID.NotFound" in str(e):
+                            LOGGER.error(str(e))
+                        else:
+                            sns_log(account_id=account_id, resource_id=instance_id, error=str(e))
+
+Conditions:
+  SNSToSlackCondition:
+    Fn::Equals:
+    - 'true'
+    - Ref: SNSEnabled

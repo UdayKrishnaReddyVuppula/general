@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create Pre/Post EventBridge rules for a patching phase
+
+Parameters:
+  WindowNames:
+    Type: String
+    Description: JSON array string of maintenance window names
+
+  LambdaTargetArn:
+    Type: String
+    Description: ARN of the notification Lambda function
+
+  ActualMWCron:
+    Type: String
+    Description: The cron expression used by the actual SSM maintenance window
+
+  PreSchedule:
+    Type: String
+    Description: Cron schedule for the pre-patch notification
+
+  PostSchedule:
+    Type: String
+    Description: Cron schedule for the post-patch notification
+
+  SNSArn:
+    Type: String
+    Description: SNS topic ARN
+
+  AwsAccounts:
+    Type: String
+    Description: Comma-separated list of AWS account IDs
+
+  PhaseName:
+    Type: String
+    Description: A short identifier like '<<PLACEHOLDER>>_maintenance_window'
+
+Resources:
+  PreNotificationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${PhaseName}-PreRule"
+      ScheduleExpression: !Ref PreSchedule
+      State: ENABLED
+      Targets:
+        - Id: "PreTarget"
+          Arn: !Ref LambdaTargetArn
+          Input: !Sub |
+            {
+              "window": ${WindowNames},
+              "cron": "${ActualMWCron}",
+              "SNSArn": "${SNSArn}",
+              "awsAccounts": "${AwsAccounts}",
+              "type": "Pre"
+            }
+
+  PostNotificationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${PhaseName}-PostRule"
+      ScheduleExpression: !Ref PostSchedule
+      State: ENABLED
+      Targets:
+        - Id: "PostTarget"
+          Arn: !Ref LambdaTargetArn
+          Input: !Sub |
+            {
+              "window": ${WindowNames},
+              "cron": "${ActualMWCron}",
+              "SNSArn": "${SNSArn}",
+              "awsAccounts": "${AwsAccounts}",
+              "type": "Post"
+            }

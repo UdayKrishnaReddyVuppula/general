@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation Template to create EBS snapshots for EC2 volumes and notify via SNS before patching.
+
+Parameters:
+  NotificationSNSTopicName:
+    Type: String
+    Description: The name of the SNS topic to use for notifications about snapshot creation.
+    Default: 'patch-test2'
+  CustomPatchingTagValue:
+    Type: String
+    Default: default
+
+Resources:
+  SnapshotFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Pre-Patching-snapshots
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import datetime
+          import json
+          import os
+
+          ec2 = boto3.client('ec2')
+          sns = boto3.client('sns')
+
+          def handler(event, context):
+              tag_key = event.get('CustomPatchingTagKey', 'patch.allcloud.io:phase')
+              tag_value = event.get('CustomPatchingTagValue')
+              notification_topic_arn = os.environ.get('NOTIFICATION_TOPIC_ARN')
+
+              if not tag_value:
+                  return {
+                      'statusCode': 400,
+                      'body': 'Missing patching in input event'
+                  }
+
+              if not notification_topic_arn:
+                  return {
+                      'statusCode': 400,
+                      'body': 'Missing NOTIFICATION_TOPIC_ARN in environment variables'
+                  }
+
+              now = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+              snapshots = []
+              instances_data = []
+
+              print(f"Looking for instances with tag: {tag_key}={tag_value}")
+
+              instances = ec2.describe_instances(
+                  Filters=[{'Name': f'tag:{tag_key}', 'Values': [tag_value]}]
+              )
+
+              for reservation in instances['Reservations']:
+                  for instance in reservation['Instances']:
+                      instance_id = instance['InstanceId']
+                      instance_name = 'No Name'
+
+                      for tag in instance.get('Tags', []):
+                          if tag['Key'] == 'Name':
+                              instance_name = tag['Value']
+                              break
+
+                      volumes = instance.get('BlockDeviceMappings', [])
+                      instance_snapshots = []
+
+                      for volume in volumes:
+                          volume_id = volume['Ebs']['VolumeId']
+                          response = ec2.create_snapshot(
+                              VolumeId=volume_id,
+                              Description="Snapshot created as part of Patching Automation"
+                          )
+                          snapshot_id = response['SnapshotId']
+                          instance_snapshots.append(snapshot_id)
+                          snapshots.append(snapshot_id)
+
+                      instances_data.append({
+                          'InstanceId': instance_id,
+                          'InstanceName': instance_name,
+                          'Snapshots': instance_snapshots
+                      })
+
+              message_lines = [
+                  f"Subject: 🔧 Upcoming Patching Activity –: {
+                  }",
+                  "Dear Customer,",
+                  "The following patching activity is scheduled to begin shortly:",
+                  f"🛠️ Patching : {tag_value}",
+                  "📌 Status: All snapshots have been created successfully. Patching will commence soon.",
+                  "🗂️ Instances & Snapshots:"
+              ]
+
+              for instance in instances_data:
+                  message_lines.append(f"• {instance['InstanceName']} ({instance['InstanceId']})")
+                  for snap_id in instance['Snapshots']:
+                      message_lines.append(f"  {snap_id}")
+
+              message_lines.append("If you have any concerns or questions, please feel free to reach out.")
+
+              formatted_message = "\n".join(message_lines)
+
+              sns.publish(
+                  TopicArn=notification_topic_arn,
+                  Message=formatted_message,
+                  Subject=f'🔧 Upcoming Patching Activity –: {tag_value}'
+              )
+
+              return {
+                  'statusCode': 200,
+                  'body': f'Snapshots created for instances: {json.dumps(instances_data)}'
+              }
+
+      Runtime: python3.12
+      Timeout: 300
+      MemorySize: 128
+      Environment:
+        Variables:
+          NOTIFICATION_TOPIC_ARN: !Ref NotificationSNSTopic
+      
+  LambdaPermissionForMaintenanceWindowRole:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !GetAtt SnapshotFunction.Arn
+        Action: lambda:InvokeFunction
+        Principal: !Sub arn:aws:iam::${AWS::AccountId}:role/MaintenanceWindowRole
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PatchingSnapshotLambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PatchingSnapshotLambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:CreateSnapshot
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationSNSTopic
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+Outputs:
+  SnapshotFunctionArn:
+    Description: 'ARN of the Lambda function for creating snapshots'
+    Value: !GetAtt SnapshotFunction.Arn
+  NotificationSNSTopicArn:
+    Description: 'ARN of the SNS topic for notifications'
+    Value: !Ref NotificationSNSTopic

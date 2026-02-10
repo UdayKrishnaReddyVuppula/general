@@ -1,0 +1,517 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation template for EC2 with patch baseline and patch group - notify pre and post.
+
+Parameters:
+  NamePrefix:
+    Type: String
+  AlertsEmail:
+    Description: It is used for email sent to the customer with a method to contact one. response..(do it better)
+    Type: String
+  LayerKey:
+    Description: Croniter layer needed by notification lambda to filter non compliant messages.
+    Type: String
+    Default: croniter-layer.zip
+  AthenaOutputBucket:
+    Description: Bucket used for Athena queries output storage.
+    Type: String
+  OrgID:
+    Description: The OrgID of the AWS Organization holding accounts included in patching system.
+    Type: String
+  KMSKeyForS3:
+    Description: The KMS key used to encrypt/decrypt Athena output bucket and managed-instances-data-account-region S3 bucket.
+    Type: String
+  AthenaTableName:
+    Description: The Athena table containing the compliance entry data from all accounts.
+    Type: String
+    Default: aws_complianceitem
+  AthenaDatabaseName:
+    Description: The audit Athena database for managed instances.
+    Type: String
+    Default: managed_instances_database
+  CustomPatchingTagKey:
+    Type: String
+    Default: env
+
+Resources:
+  NotificationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.13
+      Timeout: 30
+      Environment:
+        Variables:
+          ALERTS_EMAIL: !Ref AlertsEmail
+          ATHENA_TABLE_NAME: !Ref AthenaTableName
+          ATHENA_DATABASE_NAME: !Ref AthenaDatabaseName
+          ATHENA_OUTPUT_BUCKET: !Ref AthenaOutputBucket
+      Layers:
+        - !Ref LambdaLayer
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          import time
+          import croniter
+          import datetime
+          import re
+
+          def get_configuration_aggregator_names():
+              config_client = boto3.client('config')
+              aggregator_names = []
+              try:
+                  response = config_client.describe_configuration_aggregators()
+                  aggregators = response.get('ConfigurationAggregators', [])
+                  for aggregator in aggregators:
+                      aggregator_names.append(aggregator['ConfigurationAggregatorName'])
+                  return aggregator_names
+              except Exception as e:
+                  print(f"Error retrieving Configuration Aggregator names: {e}")
+                  return []
+
+          def get_instances(account, maintenance_windows):
+              config_client = boto3.client('config')
+              all_results = []
+              if isinstance(maintenance_windows, str):
+                  maintenance_windows = [maintenance_windows]
+
+              for aggregator in get_configuration_aggregator_names():
+                  tag_filters = " OR ".join([f"tags.tag = 'maintenance_window={mw}'" for mw in maintenance_windows])
+                  query = f"""
+                  SELECT resourceId, resourceName, resourceType, accountId, tags
+                  WHERE ({tag_filters})
+                  AND resourceType = 'AWS::EC2::Instance'
+                  AND accountId = '{account}'
+                  """
+                  try:
+                      response = config_client.select_aggregate_resource_config(
+                          Expression=query,
+                          ConfigurationAggregatorName=aggregator,
+                          Limit=100
+                      )
+                      all_results.extend(response.get('Results', []))
+                  except Exception as e:
+                      print(f"Error querying config aggregator {aggregator}: {e}")
+
+              return all_results
+
+          def send_notification(sns_topic_arn, message, subject=None):
+              sns_client = boto3.client('sns')
+              publish_args = {
+                  'TopicArn': sns_topic_arn,
+                  'Message': message
+              }
+              if subject:
+                  publish_args['Subject'] = subject
+              sns_client.publish(**publish_args)
+
+          def get_last_cron_run_glue_format(cron_expression):
+              try:
+                  now = datetime.datetime.now(datetime.timezone.utc)
+                  cron_expression = cron_expression[5:-1]  # strip "cron(" and ")"
+                  cron = croniter.croniter(cron_expression, now)
+                  last_run = cron.get_prev(datetime.datetime)
+                  return last_run.strftime("%Y-%m-%d %H:%M:%S")
+              except Exception as e:
+                  print(f"Error parsing cron expression: {e}")
+                  return None
+
+          def run_athena_query(database_name, table_name, query, s3_output_location):
+              athena_client = boto3.client('athena')
+              try:
+                  response = athena_client.start_query_execution(
+                      QueryString=query,
+                      QueryExecutionContext={'Database': database_name},
+                      ResultConfiguration={'OutputLocation': s3_output_location}
+                  )
+                  query_execution_id = response['QueryExecutionId']
+
+                  state = 'QUEUED'
+                  while state in ['QUEUED', 'RUNNING']:
+                      response = athena_client.get_query_execution(QueryExecutionId=query_execution_id)
+                      if 'QueryExecution' in response and 'Status' in response['QueryExecution']:
+                          state = response['QueryExecution']['Status']['State']
+                          if state == 'FAILED':
+                              raise Exception(f"Athena query failed: {response['QueryExecution']['Status']['StatusDetails']}")
+                          elif state == 'CANCELLED':
+                              raise Exception("Athena query cancelled")
+                      time.sleep(2)
+
+                  results = []
+                  if state == 'SUCCEEDED':
+                      response = athena_client.get_query_results(QueryExecutionId=query_execution_id)
+                      column_info = response['ResultSet']['ResultSetMetadata']['ColumnInfo']
+                      rows = response['ResultSet']['Rows']
+                      header = [col['Name'] for col in column_info]
+
+                      for row in rows[1:]:
+                          result_row = {}
+                          for i, col in enumerate(header):
+                              result_row[col] = row['Data'][i].get('VarCharValue') if row['Data'][i] else None
+                          results.append(result_row)
+                  return results
+              except Exception as e:
+                  print(f"Error running Athena query: {e}")
+                  return []
+
+          def non_compliant_athena_search(after_last_run, account, instance_ids):
+              database_name = os.environ.get('ATHENA_DATABASE_NAME')
+              table_name = os.environ.get('ATHENA_TABLE_NAME')
+              if not instance_ids:
+                  return None
+              query = f"""
+                  SELECT
+                      status,
+                      title,
+                      id,
+                      resourceid,
+                      severity,
+                      executiontime
+                  FROM
+                      "{database_name}"."{table_name}"
+                  WHERE
+                      status='NON_COMPLIANT'
+                      AND compliancetype='Patch'
+                      AND CAST(REPLACE(REPLACE(executiontime, 'T', ' '), 'Z', '') AS TIMESTAMP) >= TIMESTAMP '{after_last_run}'
+                      AND accountid = '{account}'
+                      AND resourceid IN ({', '.join(map(lambda x: f"'{x}'", instance_ids))})
+                  LIMIT 20
+              """
+              s3_output_location = f"s3://{os.environ.get('ATHENA_OUTPUT_BUCKET')}"
+              return run_athena_query(database_name, table_name, query, s3_output_location)
+
+          def extract_phase(maintenance_windows):
+              for mw in maintenance_windows:
+                  match = re.search(r'CustomPatchingTagKey(\d+)_', mw.lower())
+                  if match:
+                      return match.group(1)
+              return None
+
+          def lambda_handler(event, context):
+              maintenance_windows = event['window']
+              if isinstance(maintenance_windows, str):
+                  maintenance_windows = [maintenance_windows]
+
+              sns_topic_arn = event['SNSArn']
+              cron = event['cron']
+              accounts_str = event['awsAccounts']
+              accounts = [acct.strip() for acct in accounts_str.split(",") if acct.strip()]
+              event_type = event.get('type', 'Pre')
+              alerts_email = os.environ.get('ALERTS_EMAIL')
+
+              phase = extract_phase(maintenance_windows)
+              subject = f"AWS Patching Notification {phase}"
+
+              if event_type == 'Pre':
+                  next_run = None
+                  try:
+                      cron_expression = cron[5:-1]
+                      now = datetime.datetime.now(datetime.timezone.utc)
+                      cron_schedule = croniter.croniter(cron_expression, now)
+                      next_run = cron_schedule.get_next(datetime.datetime).strftime("%Y-%m-%d %H:%M:%S")
+                  except Exception as e:
+                      print(f"Error calculating next run from cron: {e}")
+
+                  message = f"Hi!\n\nThis is a Pre Patching notification.\n"
+                  if next_run:
+                      message += f"Next patching is scheduled for: {next_run} (UTC)\n"
+                  message += f"Maintenance window(s): {', '.join(maintenance_windows)}\n"
+                  message += f"Accounts impacted: {', '.join(accounts)}\n\n"
+
+                  for account in accounts:
+                      instances = get_instances(account, maintenance_windows)
+                      all_instance_details = []
+                      for instance_data in instances:
+                          instance_json = json.loads(instance_data)
+                          instance_id = instance_json.get('resourceId')
+
+                          tags = instance_json.get('tags', [])
+                          instance_name = None
+
+                          if isinstance(tags, list):
+                              for tag in tags:
+                                  if ('Key' in tag and tag['Key'] == 'Name') or ('key' in tag and tag['key'] == 'Name'):
+                                      instance_name = tag.get('Value') or tag.get('value')
+                                      break
+                          elif isinstance(tags, dict):
+                              instance_name = tags.get('Name')
+
+                          all_instance_details.append((account, instance_id, instance_name))
+
+                      if not all_instance_details:
+                          message += f"No instances found in account: {account}\n"
+                      else:
+                          message += f"Instances in account {account}:\n"
+                          for acct, iid, iname in all_instance_details:
+                              if iname:
+                                  message += f"  Instance ID: {iid}, Name: {iname}\n"
+                              else:
+                                  message += f"  Instance ID: {iid}\n"
+                          message += "\n"
+
+                  message += f"If you have questions or concerns, please contact: {alerts_email}\n"
+                  send_notification(sns_topic_arn, message, subject)
+
+              elif event_type == 'Post':
+                  message = f"Hi!\n\nThis is a Post Patching notification.\n"
+                  message += f"Maintenance window(s): {', '.join(maintenance_windows)} is completed.\n\n"
+                  for account in accounts:
+                      instances = get_instances(account, maintenance_windows)
+                      instance_ids = []
+                      for instance_data in instances:
+                          instance_json = json.loads(instance_data)
+                          instance_ids.append(instance_json.get('resourceId'))
+                      after_last_run = get_last_cron_run_glue_format(cron)
+                      non_compliant_resources = non_compliant_athena_search(after_last_run, account, instance_ids)
+                      if non_compliant_resources:
+                          message += f"Account: {account} - Non-compliant resources:\n"
+                          for resource in non_compliant_resources:
+                              message += f"  Resource ID: {resource['resourceid']}, Title: {resource['title']}, Severity: {resource['severity']}, Execution Time: {resource['executiontime']}\n"
+                          message += "\n"
+                      else:
+                          message += f"Account: {account} - No non-compliant resources found.\n\n"
+
+                  message += f"If you have questions or concerns, please contact: {alerts_email}\n"
+                  send_notification(sns_topic_arn, message, subject)
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Lambda execution complete!')
+              }
+
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: "LambdaFunctionCorePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "config:SelectAggregateResourceConfig"
+                  - "sns:Publish"
+                  - "ssm:DescribeInstancePatches"
+                  - "config:DescribeConfigurationAggregators"
+                  - "config:Describe*"
+                  - "config:Get*"
+                  - "config:List*"
+                  - "config:BatchGet*"
+                  - "config:SelectResourceConfig"
+                Resource: "*"
+        - PolicyName: "AthenaPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "athena:StartQueryExecution"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "athena:GetQueryExecution"
+                  - "athena:GetQueryResults"
+                Resource:
+                  - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:table/${AthenaDatabaseName}/${AthenaTableName}"
+                  - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:database/${AthenaDatabaseName}"
+                  - !Sub "arn:aws:s3:::${AthenaOutputBucket}/*"
+                  - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/primary"
+              - Effect: "Allow"
+                Action:
+                  - "glue:GetTable"
+                  - "glue:GetDatabase"
+                  - "glue:GetPartition"
+                  - "glue:GetTables"
+                  - "glue:GetDatabases"
+                  - "glue:GetPartitions"
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${AthenaDatabaseName}/${AthenaTableName}" # Specific table
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${AthenaDatabaseName}" # Specific database
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/${AWS::AccountId}/database/${AthenaDatabaseName}/table/${AthenaTableName}/partition/*" # All partitions in the table
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/${AWS::AccountId}/database/${AthenaDatabaseName}/table/*" #all tables in the database
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/${AWS::AccountId}/database/${AthenaDatabaseName}/table/${AthenaTableName}/partition/*" #all partitions in the table
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+        - PolicyName: "LambdaS3KMSPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetBucketLocation"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:ListMultipartUploadParts"
+                  - "s3:AbortMultipartUpload"
+                  - "s3:CreateBucket"
+                Resource:
+                  - !Sub "arn:aws:s3:::${AthenaOutputBucket}" #  For the Athena output bucket
+                  - !Sub "arn:aws:s3:::${AthenaOutputBucket}/*" #  For objects within the Athena output bucket
+                  - !Sub "arn:aws:s3:::managed-instances-data-${AWS::Region}-${AWS::AccountId}" # Generic bucket
+                  - !Sub "arn:aws:s3:::managed-instances-data-${AWS::Region}-${AWS::AccountId}/*" # Generic bucket objects
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource: !Sub "arn:aws:s3:::${AthenaOutputBucket}/*"
+              - Effect: "Allow"
+                Action:
+                  - "kms:Decrypt"
+                Resource: !Ref KMSKeyForS3
+
+  CroniterLayerBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: !Sub "croniters-${AWS::AccountId}-${AWS::Region}"
+        VersioningConfiguration:
+          Status: Enabled
+
+  LayerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt LayerFunctionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          import boto3
+          import subprocess
+          import os
+          import zipfile
+          import tempfile
+          import shutil
+          import cfnresponse
+
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      print(event)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, None)
+                      return
+
+                  bucket = event['ResourceProperties']['Bucket']
+                  key = event['ResourceProperties']['Key']
+
+                  with tempfile.TemporaryDirectory() as temp_dir:
+                      # Install croniter into a 'python' subdirectory
+                      python_dir = os.path.join(temp_dir, 'python')
+                      os.makedirs(python_dir, exist_ok=True)  # Create the python directory
+
+                      subprocess.check_call([
+                          'pip',
+                          'install',
+                          'croniter',
+                          '-t',
+                          python_dir,  # Install into the 'python' subdirectory
+                          '--platform',
+                          'manylinux2014_x86_64',
+                          '--only-binary=:all:',
+                      ])
+
+                      zip_filename = '/tmp/layer.zip'
+                      with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                          for root, dirs, files in os.walk(python_dir): #zip the python directory.
+                              for file in files:
+                                  file_path = os.path.join(root, file)
+                                  relative_path = os.path.relpath(file_path, temp_dir) # make it relative to temp dir.
+                                  zipf.write(file_path, relative_path)
+
+                      s3.upload_file(zip_filename, bucket, key)
+                  response_data = {'Bucket': bucket, 'Key': key}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, None)
+
+              except Exception as e:
+                  print(e)
+                  print(event)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, None)
+
+  LayerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${CroniterLayerBucket}/${LayerKey}
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  CustomLayer:
+    Type: Custom::Layer
+    Properties:
+      ServiceToken: !GetAtt LayerFunction.Arn
+      Bucket: !Ref CroniterLayerBucket
+      Key: !Ref LayerKey
+
+  LambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: CroniterLayer
+      CompatibleRuntimes:
+        - python3.13
+      CompatibleArchitectures:
+        - x86_64
+      Content:
+        S3Bucket: !Ref CroniterLayerBucket
+        S3Key: !GetAtt CustomLayer.Key
+
+  EventsRuleCreatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "*"  #  Allow any AWS account to attempt to assume the role within org
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrgID
+      Policies:
+        - PolicyName: EventsRuleCreationPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "events:PutRule"
+                  - "events:PutTargets"
+                  - "events:DescribeRule"
+                  - "events:RemoveTargets"
+                  - "events:DeleteRule"
+                  - "events:ListRules"
+                  - "events:ListTargetsByRule"
+                Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*" # Events account

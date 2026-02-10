@@ -1,0 +1,27 @@
+stack_name: AllCloud-PatchMGMT-Inspector-Reports
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yml
+
+params:
+  NamePrefix: <NAME_PREFIX>
+  DevSchedule: "0 10 ? * THU *"
+  ProdSchedule: "0 11 ? * THU#4 *"
+  SNSTopic: "arn:aws:sns:<REGION>:<AUDIT_ACCOUNT_ID>:<SNS_TOPIC_NAME>"
+  AutomationName: "InspectorReports"
+  BucketName: "aws-inspector-findings-reports-<AUDIT_ACCOUNT_ID>-<REGION>"
+  ReferenceBucketName: "<REFERENCE_BUCKET_NAME>"
+  ReferenceObjectKey: "<REFERENCE_OBJECT_KEY>"
+
+targets:
+  - <AUDIT_ACCOUNT>
+
+regions:
+  - global_main-region
+
+tags:
+  - Key: Config
+    Value: "AllCloud-PatchMGMT-Inspector-Reports"
+  - Key: Service
+    Value: "Security Management"

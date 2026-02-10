@@ -1,0 +1,23 @@
+stack_name: AllCloud-PatchMGMT-patchNotification-Central
+type: cloudformation
+properties:
+  cloudformation:
+    template_name: template.yaml
+
+params:
+  NamePrefix: <NAME_PREFIX>
+  AlertsEmail: <ALERTS_EMAIL> #eg : genie-support@allcloud.io or genie-alerts@allcloud.io depending on preference
+  OrgID: <AWS_ORGANIZATION_ID> #Customer Organization ID
+  AthenaOutputBucket: "athena-query-results-<REGION>-<AUDIT_ACCOUNT_ID>"
+  KMSKeyForS3: "arn:aws:kms:<REGION>:<AUDIT_ACCOUNT_ID>:key/<KMS_KEY_ID>"
+  CustomPatchingTagKey: "patch.allcloud.io:phase" #PatchingKey to be used for tagging. If not provided default will be 'env'
+
+targets: # Target Account/OU where this needs to be deployed
+  - <AUDIT_ACCOUNT>
+
+regions:
+  - global_main-region
+
+tags:
+  - Key: Config
+    Value: "AllCloud-PatchMGMT-notification"

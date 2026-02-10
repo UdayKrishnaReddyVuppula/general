@@ -1,0 +1,360 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: The AWS CloudFormation template for automating the creation of vulnerability reports for the PatchMGMT solution.
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: aws-controltower
+  DevSchedule:
+    Type: String
+    Description: The cron schedule for the Dev reports
+    Default: "0 10 ? * THU *"
+  ProdSchedule:
+    Type: String
+    Description: The cron schedule for the Prod reports
+    Default: "0 11 ? * THU#4 *"
+  SNSTopic:
+    Type: String
+    Description: 'SNS topic arn to which errors should be sent.'
+    Default: ''
+  AutomationName:
+    Type: String
+    Description: 'Name of the automation to be used for the slack notifications.'
+    Default: 'Automations'
+  BucketName:
+    Type: String
+    Description: 'Bucket in which the reports will be sent.'
+  ReferenceBucketName:
+    Type: String
+    Description: 'Bucket in from which the account reference table is taken.'
+  ReferenceObjectKey:
+    Type: String
+    Description: 'The object key of the account reference table csv.'
+Resources:
+  InspectorKey:
+    Type: AWS::KMS::Key
+    DependsOn: InspectorPatchingReportsLambdaRole
+    Properties:
+      KeyPolicy:
+        Statement:
+          - Sid: default
+            Action: kms:*
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - 'arn:'
+                  - !Ref 'AWS::Partition'
+                  - ':iam::'
+                  - !Ref 'AWS::AccountId'
+                  - :root
+            Resource: '*'
+          - Sid: AllowInspector
+            Effect: Allow
+            Principal:
+              Service: inspector2.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:inspector2:${AWS::Region}:${AWS::AccountId}:report/*"
+          - Sid: AllowLambda
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-controltower-inspector-patching-reports-${AWS::Region}-role"
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+            Resource: '*'
+        Version: '2012-10-17'
+      Description: Key for Insspector PatchMGMT findings reports
+      Enabled: true
+      EnableKeyRotation: true
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+  DevInspectorPatchingReportsPermissionToCallLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InspectorPatchingReportsLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "DevInspectorPatchingReportsScheduledRule"
+          - "Arn"
+  DevInspectorPatchingReportsScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule for InspectorPatchingReportsLambda Dev instances"
+      ScheduleExpression: !Sub "cron(${DevSchedule})"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "InspectorPatchingReportsLambda"
+              - "Arn"
+          Id: "patch-dev-inspector-reports"
+          Input: '{"environment":"Dev"}'
+  ProdInspectorPatchingReportsPermissionToCallLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InspectorPatchingReportsLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "ProdInspectorPatchingReportsScheduledRule"
+          - "Arn"
+  ProdInspectorPatchingReportsScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule for InspectorPatchingReportsLambda Prod instances"
+      ScheduleExpression: !Sub "cron(${ProdSchedule})"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "InspectorPatchingReportsLambda"
+              - "Arn"
+          Id: "patch-prod-inspector-reports"
+          Input: '{"environment":"Prod"}'
+  InspectorPatchingReportsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-inspector-patching-reports-${AWS::Region}-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub "${NamePrefix}-inspector-patching-reports-${AWS::Region}-policy"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - inspector2:CreateFindingsReport
+                  - inspector2:ListFindings
+                  - inspector2:GetFindingsReportStatus
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  Ref: SNSTopic
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ReferenceBucketName}/${ReferenceObjectKey}"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}/*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}/*"
+  InspectorPatchingReportsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-inspector-patching-reports-func"
+      Description: Exports Inspector ec2 vulnerability reports.
+      Handler: index.lambda_handler
+      Role: !GetAtt InspectorPatchingReportsLambdaRole.Arn
+      Environment:
+        Variables:
+          SNS_TOPIC: !Ref "SNSTopic"
+          AUTOMATION_NAME: !Ref 'AutomationName'
+          BUCKET_NAME: !Ref 'BucketName'
+          REFERENCE_BUCKET_NAME: !Ref 'ReferenceBucketName'
+          REFERENCE_OBJECT_KEY: !Ref 'ReferenceObjectKey'
+          KEY_ARN: 
+            Fn::GetAtt:
+              - "InspectorKey"
+              - "Arn"
+      Runtime: python3.11
+      Timeout: 60
+      Code: 
+        ZipFile: |
+                import boto3
+                import logging
+                import os
+                import json
+                import time
+                import codecs
+                import csv
+                import io
+                import datetime
+                
+                logger = logging.getLogger()
+                logger.setLevel(logging.INFO)
+                
+                inspector = boto3.client('inspector2')
+                s3_client = boto3.client("s3")
+                
+                sns_topic = os.environ['SNS_TOPIC']
+                automation_name = os.environ['AUTOMATION_NAME']
+                bucket_name = os.environ['BUCKET_NAME']
+                key_arn = os.environ['KEY_ARN']
+                reference_key = os.environ['REFERENCE_OBJECT_KEY']
+                reference_bucket = os.environ['REFERENCE_BUCKET_NAME']
+                
+                
+                def sns_log(account_id=None, resource_id=None, error=None, extra_information=None):
+                    sns_client = boto3.client('sns')
+                
+                    message = {
+                        "AppName": automation_name,
+                        "AccountId": account_id,
+                        "ResourceId": resource_id,
+                        "Error": error,
+                        "ExtraInformation": extra_information,
+                        "Timestamp": time.time()
+                    }
+                
+                    print(message)
+                    sns_client.publish(
+                        TargetArn=sns_topic,
+                        Message=json.dumps({'default': json.dumps(message)}),
+                        MessageStructure='json')
+                
+                def export_report(environment, key_prefix):
+                    response = inspector.create_findings_report(
+                            filterCriteria={
+                                'resourceTags': [
+                                    {
+                                        'comparison': 'EQUALS',
+                                        'key': 'environment',
+                                        'value': environment
+                                    },
+                                ],
+                                'resourceType': [
+                                    {
+                                        'comparison': 'EQUALS',
+                                        'value': 'AWS_EC2_INSTANCE'
+                                    },
+                                ]
+                            },
+                            reportFormat='CSV',
+                            s3Destination={
+                                'bucketName': bucket_name,
+                                'keyPrefix': key_prefix,
+                                'kmsKeyArn': key_arn
+                            }
+                        )
+                    return response['reportId']
+                
+                def download_csv(s3_key, bucket_name):
+                    data = s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+                    csv_dict = csv.DictReader(codecs.getreader("utf-8")(data["Body"]))
+                
+                    result = []
+                    for entry in csv_dict:
+                        result.append(entry)
+                
+                    return result
+                
+                def process_report(vulnerabilities_report, lookup_accounts):
+                    headers = ["EC2 Instance","Account Id","Account Name","Operating System","Amazon Machine Image","Critical","High","All"]
+                    instance_list = {}
+                
+                    for vuln in vulnerabilities_report:
+                        if vuln["Resource ID"] not in instance_list:
+                            account_name = ""
+                            for entry in lookup_accounts:
+                                if entry["accountID"] == vuln["AWS Account Id"]:
+                                    account_name = entry["accountName"]
+                                    break
+                
+                            instance_list[vuln["Resource ID"]] = {
+                              "EC2 Instance":vuln["Resource ID"],
+                              "Account Id":vuln["AWS Account Id"],
+                              "Account Name":account_name,
+                              "Operating System":vuln["Platform"],
+                              "Amazon Machine Image":vuln["Ami"],
+                              "Critical":0,
+                              "High":0,
+                              "All":0,
+                              "Old":False
+                          } 
+                        if vuln["Severity"].title() == 'Critical' or vuln["Severity"].title() == 'High':
+                            instance_list[vuln["Resource ID"]][vuln["Severity"].title()] += 1
+                            try:
+                              first_seen = datetime.datetime.strptime(vuln["First Seen"], "%Y-%m-%dT%H:%M:%S.%f%z")
+                            except:
+                              first_seen = datetime.datetime.strptime(vuln["First Seen"], "%Y-%m-%dT%H:%M:%S%z")
+                            now = datetime.datetime.now(datetime.timezone.utc)
+                            dif = now - first_seen
+                            
+                            if dif.days >= 35:
+                                instance_list[vuln["Resource ID"]]["Old"] = True
+                        else:
+                            instance_list[vuln["Resource ID"]]["All"] += 1
+                            
+                
+                    report_as_list = []
+                    
+                    for entry in instance_list:
+                        if instance_list[entry]["Old"] == True:
+                            instance_list[entry].pop("Old")
+                            report_as_list.append(instance_list[entry])
+                
+                    report_file = io.StringIO()
+                    writer = csv.DictWriter(report_file, fieldnames=headers)
+                    writer.writeheader()
+                    for row in report_as_list:
+                        writer.writerow(row)
+                
+                    return report_file
+                
+                def upload_report(s3_key, report_file):
+                    report_file = bytes(report_file.getvalue(), encoding='utf-8')
+                    response = s3_client.put_object(
+                        Body=report_file,
+                        Bucket=bucket_name,
+                        Key=s3_key,
+                    )
+                
+                def lambda_handler(event, context):
+                    environment = event['environment']
+                    key_prefix = "temp/{}".format(environment)
+                
+                
+                    try:
+                        report_id = export_report(environment, key_prefix)
+                        
+                        while inspector.get_findings_report_status(reportId=report_id)['status']=='IN_PROGRESS':
+                            time.sleep(1)
+                        
+                        s3_key = "{}/{}.csv".format(key_prefix, report_id)
+                    
+                        vulnerabilities_report = download_csv(s3_key, bucket_name)
+                        lookup_accounts = download_csv(reference_key, reference_bucket)
+                        report_file = process_report(vulnerabilities_report, lookup_accounts)
+                    
+                        upload_key = "{}/{}.csv".format(environment, report_id)
+                        upload_report(upload_key, report_file)
+                    except Exception as e:
+                        sns_log(account_id="AUDIT", error=str(e))
+
+
