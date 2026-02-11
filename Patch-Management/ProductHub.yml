@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Blueprints Hub: Service Catalog Portfolio for Patching Orchestration'
+
+Resources:
+  # 1. The Portfolio (The "Storefront")
+  PatchingPortfolio:
+    Type: AWS::ServiceCatalog::Portfolio
+    Properties:
+      DisplayName: "Operations-Blueprints-Portfolio"
+      Description: "Standardized Patching and Maintenance Orchestration Blueprints"
+      ProviderName: "Uday-test"
+
+  # 2. The Product (The "Patching Engine")
+  PatchingEngineProduct:
+    Type: AWS::ServiceCatalog::CloudFormationProduct
+    Properties:
+      Name: "Standard-Patching"
+      Owner: "Uday"
+      Description: "Orchestrates EC2/ASG patching with snapshots and customizable schedules."
+      Distributor: "Uday-test"
+      SupportDescription: "Contact Uday for support regarding patching schedules."
+      ProvisioningArtifactParameters:
+        - Name: "v1.0"
+          Description: "Initial release with JSONata and Manifest support"
+          Info:
+            LoadTemplateFromURL: "https://patch-portfolio-test.s3.amazonaws.com/ProductHub.yml"
+
+  # 3. Association (Linking the Product to the Portfolio)
+  PortfolioProductAssociation:
+    Type: AWS::ServiceCatalog::PortfolioProductAssociation
+    Properties:
+      PortfolioId: !Ref PatchingPortfolio
+      ProductId: !Ref PatchingEngineProduct
+
+Outputs:
+  PortfolioId:
+    Description: "ID of the Patching Portfolio"
+    Value: !Ref PatchingPortfolio
+  ProductId:
+    Description: "ID of the Patching Engine Product"
+    Value: !Ref PatchingEngineProduct
