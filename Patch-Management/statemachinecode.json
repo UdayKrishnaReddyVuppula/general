@@ -1,0 +1,138 @@
+{
+  "Comment": "Multi-phase Patching Orchestrator",
+  "QueryLanguage": "JSONata",
+  "StartAt": "Calendar Lambda",
+  "States": {
+    "Calendar Lambda": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "YOUR_CALENDAR_LAMBDA_ARN",
+        "Payload": "{% $states.input %}"
+      },
+      "Assign": {
+        "patchingPlan": "{% $states.result.Payload.patching_plan %}"
+      },
+      "Next": "Phase Iterator"
+    },
+    "Phase Iterator": {
+      "Type": "Map",
+      "Items": "{% $patchingPlan %}",
+      "MaxConcurrency": 1,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "Start & Stop Function",
+        "States": {
+          "Start & Stop Function": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "YOUR_START_STOP_LAMBDA_ARN",
+              "Payload": "{% $states.input %}"
+            },
+            "Next": "Wait until instances Starts"
+          },
+          "Wait until instances Starts": {
+            "Type": "Wait",
+            "Seconds": 3600,
+            "Next": "Instance State"
+          },
+          "Instance State": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Condition": "{% $states.input.instanceStatus = 'All instances start' %}",
+                "Next": "Snapshot Lambda"
+              }
+            ],
+            "Default": "Wait until instances Starts"
+          },
+          "Snapshot Lambda": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "YOUR_SNAPSHOT_LAMBDA_ARN",
+              "Payload": "{% $states.input %}"
+            },
+            "Next": "Snapshot Wait"
+          },
+          "Snapshot Wait": {
+            "Type": "Wait",
+            "Seconds": 900,
+            "Next": "Check Snapshot status Lambda"
+          },
+          "Check Snapshot status Lambda": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "YOUR_CHECK_STATUS_LAMBDA_ARN",
+              "Payload": "{% $states.input %}"
+            },
+            "Next": "Snapshot Status"
+          },
+          "Snapshot Status": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Condition": "{% $states.result.Payload.status = 'COMPLETE' %}",
+                "Next": "Wait until Patch Window Starts"
+              }
+            ],
+            "Default": "Snapshot Wait"
+          },
+          "Wait until Patch Window Starts": {
+            "Type": "Wait",
+            "Timestamp": "{% $states.input.startTime %}",
+            "Next": "Patch Start SNS"
+          },
+          "Patch Start SNS": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sns:publish",
+            "Arguments": {
+              "TopicArn": "YOUR_SNS_TOPIC_ARN",
+              "Message": "Starting Patching for {% $states.input.phaseName %}"
+            },
+            "Next": "Trigger Patching"
+          },
+          "Trigger Patching": {
+            "Type": "Parallel",
+            "End": true,
+            "Branches": [
+              {
+                "StartAt": "EC2 Lambda",
+                "States": {
+                  "EC2 Lambda": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Arguments": {
+                      "FunctionName": "YOUR_EC2_LAMBDA_ARN",
+                      "Payload": "{% $states.input %}"
+                    },
+                    "End": true
+                  }
+                }
+              },
+              {
+                "StartAt": "ASG Lambda",
+                "States": {
+                  "ASG Lambda": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Arguments": {
+                      "FunctionName": "YOUR_ASG_LAMBDA_ARN",
+                      "Payload": "{% $states.input %}"
+                    },
+                    "End": true
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "End": true
+    }
+  }
+}
